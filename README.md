@@ -37,6 +37,18 @@ Open the tracker in Chrome or Edge, click **Connect Save**, and choose this fold
 
 The browser will ask for permission. Once approved, the tracker reads `File A.rxdata`, marks party and box fusions as caught, and refreshes every few seconds while the page is open.
 
+If that folder does not work, click **Pick File** and choose the save directly, such as:
+
+```text
+%APPDATA%\infinitefusion-hoenn\File A.rxdata
+```
+
+or:
+
+```text
+%APPDATA%\infinitefusion-hoenn\File B.rxdata
+```
+
 This works from a public website because the player explicitly grants access with the browser's folder picker. The site still cannot read files silently.
 
 ### Local helper mode
