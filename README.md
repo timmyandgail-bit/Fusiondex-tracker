@@ -1,84 +1,54 @@
 # FusionDex Tracker
 
-A static Infinite Fusion 2 Pokédex checklist. Each visitor's Seen, Caught, and Favorite marks are saved in their own browser with `localStorage`.
+A static, GitHub Pages–friendly site that tracks your Pokémon Infinite Fusion 2
+(Hoenn) progress: caught/seen species, current party, and PC boxes — synced
+live from your save file, no install required.
 
-## Update the dex data
+## How it works
 
-Run this from the project folder after your local game updates:
+- Click **Connect Save** and pick your `File A.rxdata`.
+- The browser re-checks that exact file every ~4 seconds (Chrome/Edge only —
+  this uses the File System Access API, which Firefox/Safari don't support).
+- When it detects a change, it re-parses the save and updates your stats.
+- Everything is stored in **localStorage on your device only** — nothing is
+  uploaded anywhere. Export/Import let people back up or move progress
+  between browsers manually.
 
-```powershell
-python update-data.py
+## What's real vs. what's a placeholder
+
+I wrote `assets/rmarshal.js` as a working Ruby Marshal 4.8 reader (same
+approach as the Python `rmarshal.py` parser from earlier) — it correctly
+walks the actual save format: objects, arrays, hashes, symbols, strings,
+bignums, backreferences, etc.
+
+What I **could not verify** without your actual PIF2 game files:
+
+1. **Class names** — `extractTrainerData()` in `app.js` looks for an object
+   whose Ruby class is `Trainer` or `PokeBattle_Trainer`, and for ivars named
+   `@pokedex`, `@owned_standard`, `@party`, `@boxes`, `@species`,
+   `@species_data`, `@head_pokemon`, `@body_pokemon`. These are the standard
+   Pokémon Essentials names, but PIF2 may have renamed or restructured some
+   of them for Hoenn/fusion-specific data.
+2. **PC box shape** — box storage formats vary between Essentials versions
+   (`PokemonStorage` vs `PokemonStorageSystem`), so `findByIvarHint` does a
+   best-effort search rather than a hardcoded path.
+
+## To actually finish this
+
+The fastest way to confirm/fix the class and ivar names: load one save file
+and log the raw parsed tree.
+
+```js
+const buf = await (await fetch('File A.rxdata')).arrayBuffer();
+console.log(window.RMarshal.parseMarshal(buf));
 ```
 
-If your game is somewhere else:
+Open it in the browser console, find your real Trainer object, and compare
+its `__class` and `ivars` keys against what `app.js` expects. Send me what
+you find (or the save file itself) and I'll correct the field names directly
+— the parser underneath won't need to change, just the lookup paths.
 
-```powershell
-$env:FUSION_DEX_JSON="D:\Games\InfiniteFusion2\Data\pokedex\dex.json"
-python update-data.py
-```
+## Deploying
 
-Then publish the whole `fusiondex-tracker` folder to GitHub Pages, Netlify, itch.io, or any static web host.
-
-Players do not need the game files to use the tracker. Their progress stays in their own browser.
-
-## Share progress
-
-Use **Export** to download a `fusiondex-progress.json` file. Use **Import** on another browser or device to restore it.
-
-## Live party and box tracking
-
-### Public link mode, no commands
-
-Open the tracker in Chrome or Edge, click **Connect Save**, and choose this folder:
-
-```text
-%APPDATA%\infinitefusion-hoenn
-```
-
-The browser will ask for permission. Once approved, the tracker reads `File A.rxdata`, marks party and box fusions as caught, and refreshes every few seconds while the page is open.
-
-If that folder does not work, click **Pick File** and choose the save directly, such as:
-
-```text
-%APPDATA%\infinitefusion-hoenn\File A.rxdata
-```
-
-or:
-
-```text
-%APPDATA%\infinitefusion-hoenn\File B.rxdata
-```
-
-This works from a public website because the player explicitly grants access with the browser's folder picker. The site still cannot read files silently.
-
-### Local helper mode
-
-The easiest way is:
-
-```powershell
-python start-live-tracker.py
-```
-
-That starts the save watcher, opens the tracker in your browser, and keeps updating while you play.
-
-You can also run only the save watcher:
-
-```powershell
-python sync-save.py --watch
-```
-
-By default it watches:
-
-```text
-%APPDATA%\infinitefusion-hoenn\File A.rxdata
-```
-
-For a different save slot:
-
-```powershell
-python sync-save.py --save "$env:APPDATA\infinitefusion-hoenn\File B.rxdata" --watch
-```
-
-The helper writes `assets/owned-live.json`. The tracker checks that file every few seconds and marks matching fusions as caught, including their party or box location.
-
-Browsers are not allowed to read game saves directly from a public website, so live tracking requires this local helper on each player's computer.
+This is already a plain static site — push the whole folder to your
+`Fusiondex-tracker` GitHub repo and Pages will serve it as-is. No build step.

@@ -1,384 +1,299 @@
-const DATA_URL = "assets/fusiondex-data.json";
-const LIVE_URL = "assets/owned-live.json";
-const STORAGE_KEY = "fusiondex-tracker-progress-v1";
-const DB_NAME = "fusiondex-file-access";
-const DB_STORE = "handles";
-const SAVE_HANDLE_KEY = "save-folder";
+// FusionDex Tracker — app logic
+// Reads File A.rxdata via File System Access API, polls it for changes,
+// extracts caught/seen species + current party + PC boxes, and stores
+// progress in browser localStorage (private per-device).
 
-const state = {
-  dex: [],
-  live: { fusions: {}, generatedAt: null, source: null },
-  liveMode: "none",
-  progress: { seen: {}, caught: {}, favorite: {} },
-  query: "",
-  filter: "all",
-  sort: "id"
-};
+const STATE_KEY = 'fusiondex_state_v1';
+const POLL_MS = 4000;
 
-const els = {
-  grid: document.querySelector("#grid"),
-  search: document.querySelector("#searchInput"),
-  filter: document.querySelector("#statusFilter"),
-  sort: document.querySelector("#sortSelect"),
-  datasetInfo: document.querySelector("#datasetInfo"),
-  caughtCount: document.querySelector("#caughtCount"),
-  seenCount: document.querySelector("#seenCount"),
-  favoriteCount: document.querySelector("#favoriteCount"),
-  totalCount: document.querySelector("#totalCount"),
-  exportBtn: document.querySelector("#exportBtn"),
-  importInput: document.querySelector("#importInput"),
-  connectSaveBtn: document.querySelector("#connectSaveBtn"),
-  saveInfo: document.querySelector("#saveInfo"),
-  clearBtn: document.querySelector("#clearBtn"),
-  template: document.querySelector("#cardTemplate")
-};
+let fileHandle = null;
+let lastFileSize = -1;
+let lastModified = -1;
+let pollTimer = null;
 
-function loadProgress() {
+const els = {};
+
+document.addEventListener('DOMContentLoaded', () => {
+  els.connectBtn = document.getElementById('connect-save');
+  els.status = document.getElementById('sync-status');
+  els.caughtCount = document.getElementById('caught-count');
+  els.seenCount = document.getElementById('seen-count');
+  els.partyList = document.getElementById('party-list');
+  els.boxList = document.getElementById('box-list');
+  els.exportBtn = document.getElementById('export-btn');
+  els.importBtn = document.getElementById('import-btn');
+  els.importInput = document.getElementById('import-input');
+  els.clearBtn = document.getElementById('clear-progress');
+
+  els.connectBtn.addEventListener('click', connectSave);
+  els.exportBtn.addEventListener('click', exportProgress);
+  els.importBtn.addEventListener('click', () => els.importInput.click());
+  els.importInput.addEventListener('change', importProgress);
+  els.clearBtn.addEventListener('click', clearProgress);
+
+  if (!('showOpenFilePicker' in window)) {
+    els.status.textContent = 'Your browser doesn\'t support live file watching (needs Chrome or Edge). You can still use Export/Import.';
+    els.connectBtn.disabled = true;
+  }
+
+  renderFromState(loadState());
+});
+
+function loadState() {
   try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    if (saved) state.progress = saved;
-  } catch {
-    state.progress = { seen: {}, caught: {}, favorite: {} };
+    const raw = localStorage.getItem(STATE_KEY);
+    return raw ? JSON.parse(raw) : defaultState();
+  } catch (e) {
+    return defaultState();
   }
 }
 
-function saveProgress() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state.progress));
-}
-
-function idbRequest(request) {
-  return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-async function openHandleDb() {
-  const request = indexedDB.open(DB_NAME, 1);
-  request.onupgradeneeded = () => request.result.createObjectStore(DB_STORE);
-  return idbRequest(request);
-}
-
-async function saveFolderHandle(handle) {
-  const db = await openHandleDb();
-  const tx = db.transaction(DB_STORE, "readwrite");
-  tx.objectStore(DB_STORE).put(handle, SAVE_HANDLE_KEY);
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = resolve;
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-async function getFolderHandle() {
-  const db = await openHandleDb();
-  const tx = db.transaction(DB_STORE, "readonly");
-  return idbRequest(tx.objectStore(DB_STORE).get(SAVE_HANDLE_KEY));
-}
-
-function value(obj, key, fallback = null) {
-  return obj?.ivars?.[key] ?? fallback;
-}
-
-function cleanText(input) {
-  if (input instanceof Uint8Array) return new TextDecoder().decode(input);
-  return input == null ? "" : String(input);
-}
-
-function pokemonRecord(mon, location) {
-  const speciesData = value(mon, "@species_data");
-  const body = value(speciesData, "@body_pokemon");
-  const head = value(speciesData, "@head_pokemon");
-  const bodyId = value(body, "@id_number");
-  const headId = value(head, "@id_number");
-  const record = {
-    name: cleanText(value(speciesData, "@real_name") || value(mon, "@species")),
-    nickname: cleanText(value(mon, "@name")),
-    level: value(mon, "@level", "?"),
-    location,
-    personalId: value(mon, "@personalID"),
-    shiny: Boolean(value(mon, "@shiny", false))
-  };
-  if (headId && bodyId) {
-    record.fusionId = `${headId}.${bodyId}`;
-    record.head = headId;
-    record.body = bodyId;
-  } else {
-    record.speciesId = value(speciesData, "@id_number");
-  }
-  return record;
-}
-
-function addLiveRecord(fusions, record) {
-  if (!record.fusionId) return;
-  const item = fusions[record.fusionId] || { count: 0, locations: [], pokemon: [] };
-  item.count += 1;
-  if (!item.locations.includes(record.location)) item.locations.push(record.location);
-  item.pokemon.push(record);
-  fusions[record.fusionId] = item;
-}
-
-function extractSaveOwnership(save, source) {
-  const fusions = {};
-  const pokemon = [];
-  const party = value(save.player, "@party", []);
-  party.forEach((mon, index) => {
-    if (!mon) return;
-    const record = pokemonRecord(mon, `Party ${index + 1}`);
-    pokemon.push(record);
-    addLiveRecord(fusions, record);
-  });
-
-  const boxes = value(save.storage_system, "@boxes", []);
-  boxes.forEach((box, boxIndex) => {
-    const boxName = cleanText(value(box, "@name")) || `Box ${boxIndex + 1}`;
-    value(box, "@pokemon", []).forEach((mon, slotIndex) => {
-      if (!mon) return;
-      const record = pokemonRecord(mon, `${boxName} Slot ${slotIndex + 1}`);
-      pokemon.push(record);
-      addLiveRecord(fusions, record);
-    });
-  });
-
+function defaultState() {
   return {
-    generatedAt: new Date().toISOString(),
-    source,
-    pokemonCount: pokemon.length,
-    fusionCount: Object.keys(fusions).length,
-    fusions,
-    pokemon
+    caughtSpecies: [],   // national dex numbers ever caught
+    seenSpecies: [],      // national dex numbers ever seen
+    party: [],             // current party snapshot [{species, fusionHead, fusionBody, nickname, level}]
+    boxes: [],             // current box snapshot, same shape, grouped by box index
+    lastSync: null
   };
 }
 
-async function readSaveFromFolder(folderHandle, fileName = "File A.rxdata") {
-  const fileHandle = await folderHandle.getFileHandle(fileName);
+function saveState(state) {
+  localStorage.setItem(STATE_KEY, JSON.stringify(state));
+}
+
+async function connectSave() {
+  try {
+    const [handle] = await window.showOpenFilePicker({
+      types: [{ description: 'RPG Maker save', accept: { 'application/octet-stream': ['.rxdata'] } }]
+    });
+    fileHandle = handle;
+    els.status.textContent = `Watching ${handle.name}…`;
+    await syncOnce();
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(checkForChanges, POLL_MS);
+  } catch (e) {
+    if (e.name !== 'AbortError') {
+      console.error(e);
+      els.status.textContent = 'Could not open file: ' + e.message;
+    }
+  }
+}
+
+async function checkForChanges() {
+  if (!fileHandle) return;
+  try {
+    const file = await fileHandle.getFile();
+    if (file.size !== lastFileSize || file.lastModified !== lastModified) {
+      await syncOnce();
+    }
+  } catch (e) {
+    els.status.textContent = 'Lost access to save file — click Connect Save again.';
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
+async function syncOnce() {
   const file = await fileHandle.getFile();
-  const save = window.RMarshal.load(await file.arrayBuffer());
-  state.live = extractSaveOwnership(save, file.name);
-  state.liveMode = "browser";
-  const liveDate = new Date(state.live.generatedAt).toLocaleTimeString();
-  els.saveInfo.textContent = `Connected to ${file.name} · ${state.live.pokemonCount} Pokemon · ${state.live.fusionCount} fusions · ${liveDate}`;
-  render();
-}
+  lastFileSize = file.size;
+  lastModified = file.lastModified;
+  const buf = await file.arrayBuffer();
 
-async function connectSaveFolder() {
-  if (!window.showDirectoryPicker) {
-    els.saveInfo.textContent = "Folder sync needs Chrome or Edge. Firefox/Safari can still use manual progress.";
-    return;
-  }
-  const handle = await window.showDirectoryPicker({ mode: "read" });
-  await saveFolderHandle(handle);
-  await readSaveFromFolder(handle);
-}
-
-async function restoreSaveFolder() {
-  if (!window.showDirectoryPicker) return;
-  const handle = await getFolderHandle().catch(() => null);
-  if (!handle) return;
-  const permission = await handle.queryPermission({ mode: "read" });
-  if (permission === "granted" || await handle.requestPermission({ mode: "read" }) === "granted") {
-    await readSaveFromFolder(handle).catch(() => {
-      els.saveInfo.textContent = "Saved folder permission found, but File A.rxdata was not readable.";
-    });
-  }
-}
-
-function setFlag(type, id, value) {
-  state.progress[type][id] = value;
-  if (!value) delete state.progress[type][id];
-  if (type === "caught" && value) state.progress.seen[id] = true;
-  saveProgress();
-  render();
-}
-
-function isCaught(id) {
-  return Boolean(state.progress.caught[id] || state.live.fusions[id]);
-}
-
-function isSeen(id) {
-  return Boolean(state.progress.seen[id] || isCaught(id));
-}
-
-function filteredDex() {
-  const q = state.query.trim().toLowerCase();
-  const rows = state.dex.filter((item) => {
-    const id = item.id;
-    if (state.filter === "caught" && !isCaught(id)) return false;
-    if (state.filter === "seen" && !isSeen(id)) return false;
-    if (state.filter === "missing" && isCaught(id)) return false;
-    if (state.filter === "favorite" && !state.progress.favorite[id]) return false;
-    if (!q) return true;
-    return [
-      item.id,
-      item.head,
-      item.body,
-      item.entry,
-      item.author
-    ].join(" ").toLowerCase().includes(q);
-  });
-
-  rows.sort((a, b) => {
-    if (state.sort === "artist") return a.author.localeCompare(b.author) || a.sort - b.sort;
-    if (state.sort === "entries") return b.entryCount - a.entryCount || a.sort - b.sort;
-    return a.sort - b.sort;
-  });
-  return rows;
-}
-
-function renderSummary() {
-  els.totalCount.textContent = state.dex.length.toLocaleString();
-  const caught = new Set([...Object.keys(state.progress.caught), ...Object.keys(state.live.fusions)]);
-  const seen = new Set([...Object.keys(state.progress.seen), ...caught]);
-  els.caughtCount.textContent = caught.size.toLocaleString();
-  els.seenCount.textContent = seen.size.toLocaleString();
-  els.favoriteCount.textContent = Object.keys(state.progress.favorite).length.toLocaleString();
-}
-
-function ensureLiveRows() {
-  const existing = new Set(state.dex.map((item) => item.id));
-  const additions = Object.entries(state.live.fusions || {})
-    .filter(([id]) => !existing.has(id))
-    .map(([id, live]) => {
-      const [head, body] = id.split(".").map(Number);
-      const first = live.pokemon?.[0] || {};
-      return {
-        id,
-        head,
-        body,
-        sort: head * 1000 + body,
-        entry: "Owned in this save, but no written dex entry was found in the current public dex data.",
-        author: first.name || "live save sync",
-        entryCount: 0,
-        liveOnly: true
-      };
-    });
-  if (additions.length) {
-    state.dex = [...state.dex, ...additions].sort((a, b) => a.sort - b.sort);
-  }
-}
-
-function render() {
-  ensureLiveRows();
-  renderSummary();
-  const rows = filteredDex();
-  els.grid.innerHTML = "";
-
-  if (!rows.length) {
-    els.grid.innerHTML = '<p class="empty">No fusions match those filters.</p>';
+  let parsed;
+  try {
+    parsed = window.RMarshal.parseMarshal(buf);
+  } catch (e) {
+    console.error('Marshal parse failed', e);
+    els.status.textContent = 'Could not read save file (unsupported format or corrupted).';
     return;
   }
 
-  const fragment = document.createDocumentFragment();
-  for (const item of rows.slice(0, 500)) {
-    const node = els.template.content.firstElementChild.cloneNode(true);
-    const live = state.live.fusions[item.id];
-    node.classList.toggle("is-seen", isSeen(item.id));
-    node.classList.toggle("is-caught", isCaught(item.id));
-    node.classList.toggle("is-favorite", Boolean(state.progress.favorite[item.id]));
-    node.querySelector(".fusion-id").textContent = `#${item.id}`;
-    node.querySelector(".entry-count").textContent = item.liveOnly
-      ? "Live save-only fusion"
-      : `${item.entryCount} dex entr${item.entryCount === 1 ? "y" : "ies"}`;
-    node.querySelector(".entry").textContent = item.entry;
-    node.querySelector(".artist").textContent = live
-      ? `${live.count} owned · ${live.locations.slice(0, 3).join(", ")}`
-      : `Entry by ${item.author || "unknown artist"}`;
-    node.querySelector(".favorite").textContent = state.progress.favorite[item.id] ? "★" : "☆";
-    node.querySelector(".seen").addEventListener("click", () => setFlag("seen", item.id, !state.progress.seen[item.id]));
-    node.querySelector(".caught").addEventListener("click", () => setFlag("caught", item.id, !state.progress.caught[item.id]));
-    node.querySelector(".favorite").addEventListener("click", () => setFlag("favorite", item.id, !state.progress.favorite[item.id]));
-    fragment.append(node);
+  const result = extractTrainerData(parsed);
+  if (!result) {
+    els.status.textContent = 'Save read, but expected Trainer/Pokedex data was not found.';
+    return;
   }
 
-  els.grid.append(fragment);
-  if (rows.length > 500) {
-    const note = document.createElement("p");
-    note.className = "empty";
-    note.textContent = `Showing 500 of ${rows.length.toLocaleString()} matches. Search or filter to narrow it down.`;
-    els.grid.append(note);
+  const state = loadState();
+  mergeCaughtSeen(state, result);
+  state.party = result.party;
+  state.boxes = result.boxes;
+  state.lastSync = new Date().toISOString();
+  saveState(state);
+  renderFromState(state);
+  els.status.textContent = `Synced ${new Date().toLocaleTimeString()}`;
+}
+
+// --- Save data extraction -------------------------------------------------
+
+function extractTrainerData(rootHash) {
+  // Top level is typically a Hash keyed by symbols like ':player', ':pokedex' etc,
+  // but in many Essentials saves $Trainer / $PokemonGlobal are stored together
+  // inside a single top-level object/array depending on version. We try a few
+  // common shapes.
+  const trainer = findByClassNameHint(rootHash, ['Trainer', 'PokeBattle_Trainer']);
+  if (!trainer) return null;
+
+  const pokedex = window.RMarshal.rget(trainer, 'pokedex');
+  const ownedArr = pokedex ? window.RMarshal.rget(pokedex, 'owned_standard') : null;
+  const seenArr = pokedex ? window.RMarshal.rget(pokedex, 'seen_standard') : null;
+
+  const caughtSpecies = arrayToIndices(ownedArr);
+  const seenSpecies = arrayToIndices(seenArr);
+
+  const partyArr = window.RMarshal.rget(trainer, 'party') || [];
+  const party = partyArr.map(pokemonToSnapshot).filter(Boolean);
+
+  // PC boxes: usually a separate global object ($PokemonStorage), not on Trainer.
+  // We search the whole tree for an object exposing @boxes.
+  const storage = findByIvarHint(rootHash, 'boxes');
+  let boxes = [];
+  if (storage) {
+    const boxArr = window.RMarshal.rget(storage, 'boxes') || [];
+    boxArr.forEach((box, i) => {
+      const slots = window.RMarshal.rget(box, 'pokemon') || box; // shape varies by version
+      if (Array.isArray(slots)) {
+        slots.forEach(p => {
+          const snap = pokemonToSnapshot(p);
+          if (snap) boxes.push({ ...snap, box: i });
+        });
+      }
+    });
   }
+
+  return { caughtSpecies, seenSpecies, party, boxes };
+}
+
+function arrayToIndices(boolArray) {
+  if (!Array.isArray(boolArray)) return [];
+  const out = [];
+  boolArray.forEach((v, i) => { if (v) out.push(i); });
+  return out;
+}
+
+function pokemonToSnapshot(p) {
+  if (!p || !p.ivars) return null;
+  const species = window.RMarshal.rget(p, 'species');
+  if (species === undefined) return null;
+  const fusedData = window.RMarshal.rget(p, 'species_data');
+  let fusionHead = null, fusionBody = null;
+  if (fusedData && fusedData.ivars) {
+    const head = window.RMarshal.rget(fusedData, 'head_pokemon');
+    fusionHead = head !== undefined ? head : null;
+    // body component naming varies by version; best-effort
+    const body = window.RMarshal.rget(fusedData, 'body_pokemon');
+    fusionBody = body !== undefined ? body : null;
+  }
+  const nickname = window.RMarshal.rget(p, 'name') || null;
+  const level = window.RMarshal.rget(p, 'level') || null;
+  return { species, fusionHead, fusionBody, nickname, level };
+}
+
+function findByClassNameHint(node, classHints, seen = new Set()) {
+  if (!node || typeof node !== 'object' || seen.has(node)) return null;
+  seen.add(node);
+  if (node.__rtype === 'object' && typeof node.__class === 'string') {
+    const cls = node.__class.replace(/^:/, '');
+    if (classHints.includes(cls)) return node;
+  }
+  if (Array.isArray(node)) {
+    for (const v of node) { const r = findByClassNameHint(v, classHints, seen); if (r) return r; }
+  } else if (node instanceof Map) {
+    for (const v of node.values()) { const r = findByClassNameHint(v, classHints, seen); if (r) return r; }
+  } else if (node.ivars) {
+    for (const v of Object.values(node.ivars)) { const r = findByClassNameHint(v, classHints, seen); if (r) return r; }
+  } else if (node.value) {
+    return findByClassNameHint(node.value, classHints, seen);
+  }
+  return null;
+}
+
+function findByIvarHint(node, ivarName, seen = new Set()) {
+  if (!node || typeof node !== 'object' || seen.has(node)) return null;
+  seen.add(node);
+  if (node.ivars && (':@' + ivarName) in node.ivars) return node;
+  if (Array.isArray(node)) {
+    for (const v of node) { const r = findByIvarHint(v, ivarName, seen); if (r) return r; }
+  } else if (node instanceof Map) {
+    for (const v of node.values()) { const r = findByIvarHint(v, ivarName, seen); if (r) return r; }
+  } else if (node.ivars) {
+    for (const v of Object.values(node.ivars)) { const r = findByIvarHint(v, ivarName, seen); if (r) return r; }
+  } else if (node.value) {
+    return findByIvarHint(node.value, ivarName, seen);
+  }
+  return null;
+}
+
+function mergeCaughtSeen(state, result) {
+  const caughtSet = new Set(state.caughtSpecies);
+  const seenSet = new Set(state.seenSpecies);
+  result.caughtSpecies.forEach(i => caughtSet.add(i));
+  result.seenSpecies.forEach(i => seenSet.add(i));
+  state.caughtSpecies = Array.from(caughtSet).sort((a, b) => a - b);
+  state.seenSpecies = Array.from(seenSet).sort((a, b) => a - b);
+}
+
+// --- UI --------------------------------------------------------------------
+
+function renderFromState(state) {
+  els.caughtCount.textContent = state.caughtSpecies.length;
+  els.seenCount.textContent = state.seenSpecies.length;
+
+  els.partyList.innerHTML = '';
+  state.party.forEach(p => els.partyList.appendChild(renderPokemonCard(p)));
+
+  els.boxList.innerHTML = '';
+  state.boxes.forEach(p => els.boxList.appendChild(renderPokemonCard(p)));
+}
+
+function renderPokemonCard(p) {
+  const div = document.createElement('div');
+  div.className = 'pmon-card';
+  const label = p.fusionHead != null && p.fusionBody != null
+    ? `Fusion #${p.fusionHead}/#${p.fusionBody}`
+    : `#${p.species}`;
+  div.innerHTML = `
+    <div class="pmon-label">${label}</div>
+    <div class="pmon-sub">${p.nickname ? p.nickname + ' · ' : ''}Lv.${p.level ?? '?'}${p.box != null ? ' · Box ' + (p.box + 1) : ''}</div>
+  `;
+  return div;
 }
 
 function exportProgress() {
-  const blob = new Blob([JSON.stringify({
-    app: "FusionDex Tracker",
-    exportedAt: new Date().toISOString(),
-    progress: state.progress
-  }, null, 2)], { type: "application/json" });
-  const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
-  link.download = "fusiondex-progress.json";
-  link.click();
-  URL.revokeObjectURL(link.href);
+  const state = loadState();
+  const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'fusiondex-progress.json';
+  a.click();
 }
 
-async function importProgress(file) {
-  const text = await file.text();
-  const data = JSON.parse(text);
-  state.progress = data.progress || data;
-  saveProgress();
-  render();
+function importProgress(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const incoming = JSON.parse(reader.result);
+      const current = loadState();
+      mergeCaughtSeen(current, {
+        caughtSpecies: incoming.caughtSpecies || [],
+        seenSpecies: incoming.seenSpecies || []
+      });
+      saveState(current);
+      renderFromState(current);
+      els.status.textContent = 'Progress imported.';
+    } catch (err) {
+      els.status.textContent = 'Import failed: invalid file.';
+    }
+  };
+  reader.readAsText(file);
 }
 
-async function boot() {
-  loadProgress();
-  const response = await fetch(DATA_URL);
-  const payload = await response.json();
-  state.dex = payload.fusions;
-  els.datasetInfo.textContent = `Dataset ${payload.version} · updated ${new Date(payload.generatedAt).toLocaleDateString()} · ${payload.source}`;
-  await loadLiveOwnership();
-  await restoreSaveFolder();
-  render();
-  setInterval(loadLiveOwnership, 5000);
-  setInterval(async () => {
-    const handle = await getFolderHandle().catch(() => null);
-    if (handle) readSaveFromFolder(handle).catch(() => {});
-  }, 5000);
+function clearProgress() {
+  if (!confirm('Clear all tracked progress on this device? This cannot be undone.')) return;
+  localStorage.removeItem(STATE_KEY);
+  renderFromState(defaultState());
+  els.status.textContent = 'Progress cleared.';
 }
-
-async function loadLiveOwnership() {
-  if (state.liveMode === "browser") return;
-  try {
-    const response = await fetch(`${LIVE_URL}?t=${Date.now()}`, { cache: "no-store" });
-    if (!response.ok) return;
-    const payload = await response.json();
-    state.live = payload;
-    state.liveMode = "file";
-    const liveDate = payload.generatedAt ? new Date(payload.generatedAt).toLocaleTimeString() : "unknown time";
-    els.datasetInfo.textContent = `Live save sync active · ${Object.keys(payload.fusions || {}).length.toLocaleString()} caught fusions · updated ${liveDate}`;
-    render();
-  } catch {
-    // Hosted copies will not have a local live file until the sync helper is running.
-  }
-}
-
-els.search.addEventListener("input", (event) => {
-  state.query = event.target.value;
-  render();
-});
-els.filter.addEventListener("change", (event) => {
-  state.filter = event.target.value;
-  render();
-});
-els.sort.addEventListener("change", (event) => {
-  state.sort = event.target.value;
-  render();
-});
-els.exportBtn.addEventListener("click", exportProgress);
-els.importInput.addEventListener("change", (event) => {
-  if (event.target.files[0]) importProgress(event.target.files[0]);
-});
-els.connectSaveBtn.addEventListener("click", () => {
-  connectSaveFolder().catch((error) => {
-    els.saveInfo.textContent = `Save sync was not connected: ${error.message}`;
-  });
-});
-els.clearBtn.addEventListener("click", () => {
-  if (!confirm("Clear all tracked progress on this browser?")) return;
-  state.progress = { seen: {}, caught: {}, favorite: {} };
-  saveProgress();
-  render();
-});
-
-boot().catch(() => {
-  els.datasetInfo.textContent = "Could not load dex data. Open this through a local server or publish the folder online.";
-});
