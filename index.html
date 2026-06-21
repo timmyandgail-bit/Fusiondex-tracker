@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>FusionDex Tracker</title>
+    <link rel="stylesheet" href="assets/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Infinite Fusion 2</p>
+        <h1>FusionDex Tracker</h1>
+      </div>
+      <div class="actions">
+        <button id="connectSaveBtn" type="button">Connect Save</button>
+        <button id="exportBtn" type="button">Export</button>
+        <label class="import-btn">
+          Import
+          <input id="importInput" type="file" accept="application/json">
+        </label>
+      </div>
+    </header>
+
+    <main>
+      <section class="summary" aria-label="Progress summary">
+        <div>
+          <span id="caughtCount">0</span>
+          <small>Caught</small>
+        </div>
+        <div>
+          <span id="seenCount">0</span>
+          <small>Seen</small>
+        </div>
+        <div>
+          <span id="favoriteCount">0</span>
+          <small>Favorites</small>
+        </div>
+        <div>
+          <span id="totalCount">0</span>
+          <small>Total fusions</small>
+        </div>
+      </section>
+
+      <section class="controls" aria-label="Tracker controls">
+        <input id="searchInput" type="search" placeholder="Search fusion ID, entry, or artist">
+        <select id="statusFilter" aria-label="Status filter">
+          <option value="all">All fusions</option>
+          <option value="caught">Caught</option>
+          <option value="seen">Seen</option>
+          <option value="missing">Missing</option>
+          <option value="favorite">Favorites</option>
+        </select>
+        <select id="sortSelect" aria-label="Sort fusions">
+          <option value="id">Sort by fusion ID</option>
+          <option value="artist">Sort by artist</option>
+          <option value="entries">Sort by entry count</option>
+        </select>
+      </section>
+
+      <section class="meta">
+        <p id="datasetInfo">Loading dex data...</p>
+        <p id="saveInfo">Save sync not connected.</p>
+        <button id="clearBtn" class="danger" type="button">Clear progress</button>
+      </section>
+
+      <section id="grid" class="grid" aria-live="polite"></section>
+    </main>
+
+    <template id="cardTemplate">
+      <article class="card">
+        <div class="card-head">
+          <div>
+            <strong class="fusion-id"></strong>
+            <span class="entry-count"></span>
+          </div>
+          <button class="favorite" type="button" aria-label="Toggle favorite">☆</button>
+        </div>
+        <p class="entry"></p>
+        <p class="artist"></p>
+        <div class="card-actions">
+          <button class="seen" type="button">Seen</button>
+          <button class="caught" type="button">Caught</button>
+        </div>
+      </article>
+    </template>
+
+    <script src="assets/rmarshal.js"></script>
+    <script src="assets/app.js"></script>
+  </body>
+</html>
